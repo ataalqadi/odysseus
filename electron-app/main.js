@@ -187,6 +187,36 @@ function startSearXNG() {
   });
 }
 
+// ── Resolve the docker CLI for GUI-launched apps ─────────────────────
+// Finder/Dock-launched Electron apps get a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin)
+// that excludes /usr/local/bin and /opt/homebrew/bin, where Docker Desktop installs
+// its symlink. Resolve an absolute path so "Launch for me" works regardless of how
+// the app was started.
+function resolveDockerBin() {
+  // 1. Honor an explicit override if the user set one.
+  if (process.env.DOCKER_BIN && fs.existsSync(process.env.DOCKER_BIN)) {
+    return process.env.DOCKER_BIN;
+  }
+  // 2. Try `docker` on PATH (terminal launches, dev mode).
+  const pathEnv = process.env.PATH || '';
+  for (const dir of pathEnv.split(':')) {
+    if (!dir) continue;
+    const candidate = path.join(dir, 'docker');
+    try { if (fs.existsSync(candidate)) return candidate; } catch (_) { /* ignore */ }
+  }
+  // 3. Fall back to well-known install locations Docker Desktop uses,
+  //    which are typically absent from the GUI app's minimal PATH.
+  const fallbacks = [
+    '/usr/local/bin/docker',                                    // Homebrew Intel / Docker Desktop default
+    '/opt/homebrew/bin/docker',                                  // Homebrew Apple Silicon
+    '/Applications/Docker.app/Contents/Resources/bin/docker',    // Docker Desktop bundled
+  ];
+  for (const c of fallbacks) {
+    try { if (fs.existsSync(c)) return c; } catch (_) { /* ignore */ }
+  }
+  return null;  // let the spawn fail with the friendly ENOENT message
+}
+
 // ── IPC: launch an optional sidecar via Docker on the user's behalf ──
 // Called from the warning banner's "Launch <X> for me" button via preload.
 // Spawns `docker run -d ...` and resolves once the container is created
@@ -228,7 +258,13 @@ function launchSidecarDocker(kind) {
     }
 
     log(`launching ${kind} via docker: docker ${args.join(' ')}`);
-    const proc = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const dockerBin = resolveDockerBin();
+    if (!dockerBin) {
+      const msg = 'Docker is not installed or not on your PATH. Install Docker Desktop and try again.';
+      log(`docker launch failed for ${kind}: ${msg}`);
+      return resolve({ ok: false, error: msg });
+    }
+    const proc = spawn(dockerBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
